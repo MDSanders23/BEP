@@ -1,17 +1,32 @@
+#!/usr/bin/env python
+import argparse
 import logging
 from pathlib import Path
-import torch
-from swan.dataset import TorchGeometricGraphData, FingerprintsData, DGLGraphData
-from swan.modeller import Modeller
-from swan.modeller.models import FingerprintFullyConnected, MPNN, InvariantPolynomial
-from swan.modeller.models.se3_transformer import TFN, SE3Transformer
+
+import numpy as np
+import json
+import sklearn.gaussian_process.kernels as gp
+from scipy import stats
+
+from swan.dataset import FingerprintsData
+from swan.modeller import SKModeller
 from swan.utils.log_config import configure_logger
-from swan.utils.plot import create_scatter_plot
-from swan.modeller import scikit_modeller
 
-path_data = "/home/max/miniconda3/swan/tests/files/nnData.csv"
+configure_logger(Path("."))
 
-all_properties = [
+# Starting logger
+LOGGER = logging.getLogger(__name__)
+
+
+# Scikit learn model hyperparameters
+dict_parameters = {
+    "decision_tree": {'criterion': 'friedman_mse', 'max_features': 'auto', 'splitter': 'random'},
+    "svm": {'C': 10, 'gamma': 'auto', 'kernel': 'rbf'},
+    "gaussian_process": {"kernel": gp.ConstantKernel(1.0, (1e-4, 1e4)) * gp.RBF(10.0, (1e-4, 1e4))}
+}
+
+# Training variables
+properties = [
 "Mw",
 "#electrons",
 "Dipole moment",
@@ -92,11 +107,42 @@ all_properties = [
 "F_oscil_min_S_S_8",
 "F_oscil_min_S_S_9"
 ]
-for property in all_properties:
-    properties = [property]
-    data = FingerprintsData(
-            path_data, properties=properties, sanitize=False)
-    gaussian = scikit_modeller.SKModeller(data, "gaussianprocess")
-    trained_data = gaussian.train_model()
-    predicted, expected = gaussian.validate_model()
-    create_scatter_plot(predicted, expected, properties, f"{property} GaussianProcess")
+
+
+def run_all(path_data: str, output_file: str):
+    nruns = 3
+    models = ["gaussian_process"]  + ["decision_tree", "svm"]
+    rvalues = {}
+    for p in properties:
+        rvalues[p] = {}
+        data = FingerprintsData(
+            path_data, properties=[p], sanitize=False)
+        data.scale_labels()
+        for m in models:
+            mean = np.mean([run_scikit_model(m, data) for i in range(nruns)])
+            print(f"model: {m} property: {p} mean: {mean}")
+            rvalues[p][m] = mean
+
+    with open(f"{output_file}.json", 'w') as handler:
+        json.dump(rvalues, handler)
+
+
+def run_scikit_model(name_model: str, data: FingerprintsData):
+    parameters = dict_parameters[name_model]
+    modeller = SKModeller(data, name_model, **parameters)
+    modeller.train_model()
+    predicted, expected = modeller.validate_model()
+    reg = stats.linregress(predicted, expected.flatten())
+    return reg.rvalue
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-f", "--file", help="File with the properties", required=True)
+    parser.add_argument("-o", "--output", help="output file", required=True)
+    args = parser.parse_args()
+    run_all(args.file, args.output)
+
+
+if __name__ == "__main__":
+    main()
